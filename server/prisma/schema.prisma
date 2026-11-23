@@ -1,0 +1,336 @@
+// LECO Performance Standards - data model
+// Workflow definitions (steps, SLA clocks, KPIs) live in code: src/domain/catalog.ts
+// Everything the business needs to tune (targets, penalties, reason codes, holidays,
+// feeder classes) lives here so it can be edited from the Admin screens.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  GM
+  HENG
+  SDM
+  BM
+  CSS
+  TO
+  CLERK
+  TECHNICIAN
+  AGENT
+  BE
+  BA
+  CE
+}
+
+enum RequestStatus {
+  OPEN
+  COMPLETED
+  CANCELLED
+}
+
+enum RequestSource {
+  PORTAL
+  COUNTER
+  CALL_CENTER
+  FIELD // lodged by a Technical Officer on site
+  ADMS
+}
+
+model Branch {
+  id    Int    @id @default(autoincrement())
+  code  String @unique
+  name  String
+  cscs  Csc[]
+  users User[]
+}
+
+/// Customer Service Centre. Feeder class (1-4) is assigned CSC-wise (report section 1.5.1).
+model Csc {
+  id          Int              @id @default(autoincrement())
+  code        String           @unique
+  name        String
+  branchId    Int
+  branch      Branch           @relation(fields: [branchId], references: [id])
+  feederClass  Int
+  users        User[]
+  requests     ServiceRequest[]
+  transformers Transformer[]
+}
+
+model User {
+  id           Int            @id @default(autoincrement())
+  username     String         @unique
+  passwordHash String
+  fullName     String
+  role         Role
+  cscId        Int?
+  csc          Csc?           @relation(fields: [cscId], references: [id])
+  branchId     Int?
+  branch       Branch?        @relation(fields: [branchId], references: [id])
+  active       Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  events       ServiceEvent[]
+  assigned     ServiceRequest[]    @relation("Assignee")
+  assignedTo   RequestAssignment[] @relation("AssignmentTo")
+  assignedBy   RequestAssignment[] @relation("AssignmentBy")
+}
+
+/// Estimate approval authority (report section 2.1), editable by the administrator.
+/// A role may approve estimates up to its limit; upTo = null means no upper limit.
+model ApprovalLimit {
+  role      Role     @id
+  upTo      Float?
+  updatedAt DateTime @updatedAt
+}
+
+/// History of who a request was assigned to.
+model RequestAssignment {
+  id           Int            @id @default(autoincrement())
+  requestId    Int
+  request      ServiceRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  assignedToId Int?
+  assignedTo   User?          @relation("AssignmentTo", fields: [assignedToId], references: [id])
+  assignedById Int?
+  assignedBy   User?          @relation("AssignmentBy", fields: [assignedById], references: [id])
+  at           DateTime       @default(now())
+  note         String?
+
+  @@index([requestId])
+}
+
+model Holiday {
+  date String @id // YYYY-MM-DD (local)
+  name String
+}
+
+/// Reason codes: NON_CONFORMITY, WAYLEAVE, OBJECTION, DELAY
+model ReasonCode {
+  id          Int     @id @default(autoincrement())
+  category    String
+  code        String
+  description String
+  active      Boolean @default(true)
+
+  @@unique([category, code])
+}
+
+/// Two-stage thresholds (report section 1.5.5):
+///   internalTarget   = Threshold 11 (no changes) / 12 (with changes)  - LECO internal
+///   regulatoryTarget = Threshold 21 (no changes) / 22 (with changes)  - PUCSL
+/// Wildcards: natureOfSupply "*", changesRequired "ANY", feederClass 0. Most specific row wins.
+model Threshold {
+  id               Int     @id @default(autoincrement())
+  clockKey         String // e.g. NEW_CONNECTION.ESTIMATE
+  natureOfSupply   String  @default("*")
+  changesRequired  String  @default("ANY") // ANY | YES | NO
+  feederClass      Int     @default(0)
+  internalTarget   Float?
+  regulatoryTarget Float?
+  provisional      Boolean @default(true) // true until PUCSL publishes base-level targets
+  note             String?
+
+  @@unique([clockKey, natureOfSupply, changesRequired, feederClass])
+}
+
+/// Compensation payable to the customer for breaching the regulatory target (section 1.3).
+model PenaltyRule {
+  id                  Int     @id @default(autoincrement())
+  clockKey            String
+  natureOfSupply      String  @default("*")
+  ratePerUnit         Float // LKR per day (or per hour) of default
+  maxAmount           Float // LKR cap
+  perAffectedCustomer Boolean @default(false)
+  note                String?
+
+  @@unique([clockKey, natureOfSupply])
+}
+
+model ServiceRequest {
+  id                  Int            @id @default(autoincrement())
+  refNo               String         @unique
+  serviceType         String
+  subType             String?
+  source              RequestSource  @default(COUNTER)
+  portalReference     String?        @unique
+  cscId               Int
+  csc                 Csc            @relation(fields: [cscId], references: [id])
+  customerName        String
+  accountNo           String?
+  nic                 String?
+  mobile              String?
+  email               String?
+  address             String?
+  natureOfSupply      String?
+  changesRequired     Boolean?
+  wayleaveRequired    Boolean?
+  affectedCustomers   Int?
+  estimateAmount      Float?
+  expectedServiceDate DateTime?
+  status              RequestStatus  @default(OPEN)
+  currentStep         String?
+  assignedToId        Int?
+  assignedTo          User?          @relation("Assignee", fields: [assignedToId], references: [id])
+  assignedAt          DateTime?
+  assignments         RequestAssignment[]
+  rating              Int?
+  feedbackComment     String?
+  details             Json?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  events              ServiceEvent[]
+  clockResults        ClockResult[]
+
+  @@index([serviceType, status])
+  @@index([cscId, status])
+  @@index([assignedToId, status])
+}
+
+/// One time stamp in a service workflow ("Date 1", "Date 2"... in the report).
+model ServiceEvent {
+  id           Int            @id @default(autoincrement())
+  requestId    Int
+  request      ServiceRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  stepKey      String
+  occurredAt   DateTime
+  recordedAt   DateTime       @default(now())
+  recordedById Int?
+  recordedBy   User?          @relation(fields: [recordedById], references: [id])
+  notes        String?
+  reasonCodes  String[]
+  data         Json?
+
+  @@index([requestId, occurredAt])
+}
+
+/// Snapshot taken when an SLA clock stops. Basis for compliance, penalty and LISS reports.
+model ClockResult {
+  id               Int            @id @default(autoincrement())
+  requestId        Int
+  request          ServiceRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  clockKey         String
+  startedAt        DateTime
+  endedAt          DateTime
+  elapsed          Float
+  excluded         Float
+  unit             String
+  internalTarget   Float?
+  regulatoryTarget Float?
+  internalMet      Boolean?
+  regulatoryMet    Boolean?
+  penaltyAmount    Float          @default(0)
+  delayReasons     String[]
+  delayNotes       String?
+  feederClass      Int
+  computedAt       DateTime       @default(now())
+
+  @@unique([requestId, clockKey])
+  @@index([clockKey, endedAt])
+}
+
+// ============================================================================================
+// SUPPLY QUALITY (report section 12)
+// ============================================================================================
+
+/// Distribution / bulk transformer - the smallest interruptible section to which outages are assigned.
+model Transformer {
+  id          Int                    @id @default(autoincrement())
+  code        String                 @unique // TF ID, e.g. BZ0001
+  name        String?
+  cscId       Int
+  csc         Csc                    @relation(fields: [cscId], references: [id])
+  consumers   Int // current number of consumers
+  /// Annual energy sales to the transformer's customers (kWh), for individual compensation.
+  /// When missing, it is estimated from the feeder class energy sales pro rata to consumers.
+  annualEnergyKwh Float?
+  active      Boolean                @default(true)
+  updatedAt   DateTime               @updatedAt
+  snapshots   TransformerConsumers[]
+  records     InterruptionRecord[]
+
+  @@index([cscId])
+}
+
+/// Consumers on a transformer in a month - basis of "average consumers" for SAIDI / SAIFI.
+model TransformerConsumers {
+  transformerId Int
+  transformer   Transformer @relation(fields: [transformerId], references: [id], onDelete: Cascade)
+  month         String // YYYY-MM
+  consumers     Int
+
+  @@id([transformerId, month])
+}
+
+/// Transformer-wise interruption figures for one day and one interruption category.
+model InterruptionRecord {
+  id                    Int          @id @default(autoincrement())
+  date                  String // YYYY-MM-DD (local)
+  transformerId         Int
+  transformer           Transformer  @relation(fields: [transformerId], references: [id], onDelete: Cascade)
+  category              String // e.g. 11-LECO-F, see src/domain/supply.ts
+  consumerHours         Float // consumer hours lost
+  consumerInterruptions Float // consumer interruptions
+  ensKwh                Float        @default(0) // estimated energy not supplied (kWh), for EENS
+  cscId                 Int // CSC and feeder class at the time of upload, so history stays stable
+  feederClass           Int
+  uploadId              Int
+  upload                SupplyUpload @relation(fields: [uploadId], references: [id])
+
+  @@unique([date, transformerId, category])
+  @@index([date, feederClass])
+  @@index([date, cscId])
+}
+
+model SupplyUpload {
+  id           Int                  @id @default(autoincrement())
+  kind         String // TRANSFORMERS | INTERRUPTIONS
+  source       String // WEB | API
+  filename     String?
+  uploadedById Int?
+  uploadedAt   DateTime             @default(now())
+  rows         Int
+  periodFrom   String?
+  periodTo     String?
+  summary      Json?
+  records      InterruptionRecord[]
+}
+
+/// Approved overall / individual supply quality levels per feeder class (to be set by PUCSL).
+model SupplyTarget {
+  feederClass      Int     @id
+  saidi            Float? // hours per consumer per annum
+  saifi            Float? // interruptions per consumer per annum
+  maifi            Float?
+  individualHours  Float? // specified annual interruption duration per transformer (section 12.3)
+  provisional      Boolean @default(true)
+  note             String?
+}
+
+/// Yearly base data per feeder class for supply quality compensation (report sections 12.1 - 12.3).
+model SupplyYearData {
+  year            Int
+  feederClass     Int
+  energySalesKwh  Float? // YearEnergy: energy sales in the feeder class for the year
+  supplyCost      Float? // SUPPLYCOST: weighted average cost of supply, LKR/kWh
+  cens            Float? // CENS: cost of energy not supplied, LKR/kWh
+  approvedEensMwh Float? // approved EENS for the feeder class, MWh
+  note            String?
+  updatedAt       DateTime @updatedAt
+
+  @@id([year, feederClass])
+}
+
+model IntakeLog {
+  id         Int      @id @default(autoincrement())
+  receivedAt DateTime @default(now())
+  endpoint   String
+  portalRef  String?
+  ok         Boolean
+  message    String?
+  payload    Json?
+}

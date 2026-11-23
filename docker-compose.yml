@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: leco-ps-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: leco
+      POSTGRES_PASSWORD: leco_dev_password
+      POSTGRES_DB: performance_standards
+      TZ: Asia/Colombo
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
